@@ -1,10 +1,26 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
+import * as faceapi from "face-api.js";
 
 const EmotionBasedMusicRecommender = () => {
   const [emotion, setEmotion] = useState(""); // Store the detected emotion
   const [songs, setSongs] = useState([]); // Store recommended songs
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
+
+  // Load face-api.js models on component mount
+  useEffect(() => {
+    const loadModels = async () => {
+      try {
+        await faceapi.nets.tinyFaceDetector.loadFromUri("/models");
+        await faceapi.nets.faceExpressionNet.loadFromUri("/models");
+        console.log("Models loaded successfully!");
+      } catch (err) {
+        console.error("Error loading models:", err);
+      }
+    };
+
+    loadModels();
+  }, []);
 
   // Start video stream
   const startCamera = async () => {
@@ -16,49 +32,60 @@ const EmotionBasedMusicRecommender = () => {
     }
   };
 
-  // Capture image from video
-  const captureImage = () => {
-    const canvas = canvasRef.current;
+  // Analyze emotions directly from the video feed
+  const captureAndAnalyze = async () => {
     const video = videoRef.current;
+    const canvas = canvasRef.current;
 
-    if (canvas && video) {
-      const context = canvas.getContext("2d");
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      context.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-      const imageData = canvas.toDataURL("image/png"); // Image data as base64
-      analyzeEmotion(imageData); // Send image for emotion analysis
+    if (!video || !video.readyState) {
+      console.error("Video not ready for analysis.");
+      return;
     }
-  };
 
-  // Analyze emotion using the API (via backend)
-  const analyzeEmotion = async (imageData) => {
+    // Create a canvas context to draw and analyze
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    const displaySize = { width: video.videoWidth, height: video.videoHeight };
+    faceapi.matchDimensions(canvas, displaySize);
+
     try {
-      const response = await fetch("http://localhost:5000/api/emotion", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ image: imageData }),
-      });
+      // Detect faces and their emotions
+      const detections = await faceapi
+        .detectAllFaces(video, new faceapi.TinyFaceDetectorOptions())
+        .withFaceExpressions();
 
-      const data = await response.json();
-      if (data.emotion) {
-        setEmotion(data.emotion); // Update emotion state
-        recommendSongs(data.emotion); // Fetch recommended songs
+      if (detections.length > 0) {
+        const resizedDetections = faceapi.resizeResults(detections, displaySize);
+
+        // Draw detections on canvas
+        const ctx = canvas.getContext("2d");
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        faceapi.draw.drawDetections(canvas, resizedDetections);
+        faceapi.draw.drawFaceExpressions(canvas, resizedDetections);
+
+        // Get the dominant emotion from the first face detected
+        const expressions = detections[0].expressions;
+        const dominantEmotion = Object.keys(expressions).reduce((a, b) =>
+          expressions[a] > expressions[b] ? a : b
+        );
+
+        setEmotion(dominantEmotion);
+        recommendSongs(dominantEmotion); // Fetch recommended songs based on detected emotion
       } else {
-        console.error("Emotion analysis failed:", data.error);
+        console.log("No faces detected.");
       }
     } catch (err) {
-      console.error("Error analyzing emotion:", err);
+      console.error("Error analyzing emotions:", err);
     }
   };
 
   // Fetch song recommendations based on the detected emotion
   const recommendSongs = async (detectedEmotion) => {
     try {
-      const response = await fetch(`http://localhost:5000/api/recommend?s=${detectedEmotion}`);
+      const response = await fetch(
+        `http://localhost:5000/api/recommend?s=${detectedEmotion}`
+      );
       const data = await response.json();
       setSongs(data.songs);
     } catch (err) {
@@ -67,38 +94,89 @@ const EmotionBasedMusicRecommender = () => {
   };
 
   return (
-    <div style={{ textAlign: "center", padding: "20px" }}>
-      <h1>Emotion Based Music Recommender</h1>
-      <div>
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          style={{ width: "100%", maxWidth: "500px", margin: "10px auto", border: "1px solid black" }}
-        ></video>
-        <canvas
-          ref={canvasRef}
-          style={{ display: "none" }}
-        ></canvas>
-      </div>
-      <button onClick={startCamera} style={{ margin: "10px" }}>
-        Start Camera
-      </button>
-      <button onClick={captureImage} style={{ margin: "10px" }}>
-        Capture and Analyze
-      </button>
-      {emotion && <h2>Detected Emotion: {emotion}</h2>}
-      {songs.length > 0 && (
-        <div>
-          <h3>Recommended Songs:</h3>
-          <ul>
-            {songs.map((song, index) => (
-              <li key={index}>{song}</li>
-            ))}
-          </ul>
-        </div>
-      )}
+    <div
+  style={{
+    textAlign: "center",
+    padding: "20px",
+    backgroundColor: "black",
+    color: "white",
+    height: "100vh",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+  }}
+>
+  <h1>Emotion Based Music Recommender</h1>
+  <div
+    style={{
+      position: "relative",
+      display: "inline-block",
+    }}
+  >
+    <video
+      ref={videoRef}
+      autoPlay
+      playsInline
+      muted
+      style={{
+        width: "100%",
+        maxWidth: "500px",
+        margin: "10px auto",
+        border: "1px solid black",
+        display: "block",
+      }}
+    ></video>
+    <canvas
+      ref={canvasRef}
+      style={{
+        position: "absolute",
+        top: 0,
+        left: 0,
+        width: "100%",
+        height: "100%",
+      }}
+    ></canvas>
+  </div>
+  <div
+    style={{
+      marginTop: "20px",
+    }}
+  >
+    <button
+      onClick={startCamera}
+      style={{
+        margin: "10px",
+        padding: "10px 20px",
+        fontSize: "16px",
+      }}
+    >
+      Start Camera
+    </button>
+    <button
+      onClick={captureAndAnalyze}
+      style={{
+        margin: "10px",
+        padding: "10px 20px",
+        fontSize: "16px",
+      }}
+    >
+      Capture and Analyze
+    </button>
+  </div>
+  {emotion && <h2>Detected Emotion: {emotion}</h2>}
+  {songs.length > 0 && (
+    <div>
+      <h3>Recommended Songs:</h3>
+      <ul>
+        {songs.map((song, index) => (
+          <li key={index}>{song}</li>
+        ))}
+      </ul>
     </div>
+  )}
+</div>
+
   );
 };
 
